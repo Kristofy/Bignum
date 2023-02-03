@@ -6,22 +6,6 @@
 #include "timer.h"
 using namespace std;
 
-using bigint = long long;
-
-#include <immintrin.h>
-
-enum {
-    LIBDIVIDE_16_SHIFT_MASK = 0x1F,
-    LIBDIVIDE_32_SHIFT_MASK = 0x1F,
-    LIBDIVIDE_64_SHIFT_MASK = 0x3F,
-    LIBDIVIDE_ADD_MARKER = 0x40,
-    LIBDIVIDE_NEGATIVE_DIVISOR = 0x80
-};
-
-struct libdivide_u64_t {
-    uint64_t magic;
-    uint8_t more;
-};
 
 // Here, y is assumed to contain one 64-bit value repeated.
 static inline __m256i libdivide_mullhi_u64_vec256(__m256i x, __m256i y) {
@@ -46,175 +30,26 @@ static inline __m256i libdivide_mullhi_u64_vec256(__m256i x, __m256i y) {
     return _mm256_add_epi64(temp_lo, temp_hi);
 }
 
-
-// libdivide_128_div_64_to_64: divides a 128-bit uint {numhi, numlo} by a 64-bit uint {den}. The
-// result must fit in 64 bits. Returns the quotient directly and the remainder in *r
-static inline uint64_t libdivide_128_div_64_to_64(
-    uint64_t numhi, uint64_t numlo, uint64_t den, uint64_t *r) {
-    // N.B. resist the temptation to use __uint128_t here.
-    // In LLVM compiler-rt, it performs a 128/128 -> 128 division which is many times slower than
-    // necessary. In gcc it's better but still slower than the divlu implementation, perhaps because
-    // it's not LIBDIVIDE_INLINEd.
-#if 1 || defined(LIBDIVIDE_X86_64) && defined(LIBDIVIDE_GCC_STYLE_ASM)
+static inline uint64_t libdivide_128_div_64_to_64(uint64_t numhi, uint64_t numlo, uint64_t den, uint64_t *r) {
     uint64_t result;
     __asm__("divq %[v]" : "=a"(result), "=d"(*r) : [v] "r"(den), "a"(numlo), "d"(numhi));
     return result;
-#else
-    // We work in base 2**32.
-    // A uint32 holds a single digit. A uint64 holds two digits.
-    // Our numerator is conceptually [num3, num2, num1, num0].
-    // Our denominator is [den1, den0].
-    const uint64_t b = ((uint64_t)1 << 32);
-
-    // The high and low digits of our computed quotient.
-    uint32_t q1;
-    uint32_t q0;
-
-    // The normalization shift factor.
-    int shift;
-
-    // The high and low digits of our denominator (after normalizing).
-    // Also the low 2 digits of our numerator (after normalizing).
-    uint32_t den1;
-    uint32_t den0;
-    uint32_t num1;
-    uint32_t num0;
-
-    // A partial remainder.
-    uint64_t rem;
-
-    // The estimated quotient, and its corresponding remainder (unrelated to true remainder).
-    uint64_t qhat;
-    uint64_t rhat;
-
-    // Variables used to correct the estimated quotient.
-    uint64_t c1;
-    uint64_t c2;
-
-    // Check for overflow and divide by 0.
-    if (numhi >= den) {
-        if (r != NULL) *r = ~0ull;
-        return ~0ull;
-    }
-
-    // Determine the normalization factor. We multiply den by this, so that its leading digit is at
-    // least half b. In binary this means just shifting left by the number of leading zeros, so that
-    // there's a 1 in the MSB.
-    // We also shift numer by the same amount. This cannot overflow because numhi < den.
-    // The expression (-shift & 63) is the same as (64 - shift), except it avoids the UB of shifting
-    // by 64. The funny bitwise 'and' ensures that numlo does not get shifted into numhi if shift is
-    // 0. clang 11 has an x86 codegen bug here: see LLVM bug 50118. The sequence below avoids it.
-    shift = __builtin_clzll(den);
-    den <<= shift;
-    numhi <<= shift;
-    numhi |= (numlo >> (-shift & 63)) & (-(int64_t)shift >> 63);
-    numlo <<= shift;
-
-    // Extract the low digits of the numerator and both digits of the denominator.
-    num1 = (uint32_t)(numlo >> 32);
-    num0 = (uint32_t)(numlo & 0xFFFFFFFFu);
-    den1 = (uint32_t)(den >> 32);
-    den0 = (uint32_t)(den & 0xFFFFFFFFu);
-
-    // We wish to compute q1 = [n3 n2 n1] / [d1 d0].
-    // Estimate q1 as [n3 n2] / [d1], and then correct it.
-    // Note while qhat may be 2 digits, q1 is always 1 digit.
-    qhat = numhi / den1;
-    rhat = numhi % den1;
-    c1 = qhat * den0;
-    c2 = rhat * b + num1;
-    if (c1 > c2) qhat -= (c1 - c2 > den) ? 2 : 1;
-    q1 = (uint32_t)qhat;
-
-    // Compute the true (partial) remainder.
-    rem = numhi * b + num1 - q1 * den;
-
-    // We wish to compute q0 = [rem1 rem0 n0] / [d1 d0].
-    // Estimate q0 as [rem1 rem0] / [d1] and correct it.
-    qhat = rem / den1;
-    rhat = rem % den1;
-    c1 = qhat * den0;
-    c2 = rhat * b + num0;
-    if (c1 > c2) qhat -= (c1 - c2 > den) ? 2 : 1;
-    q0 = (uint32_t)qhat;
-
-    // Return remainder if requested.
-    if (r != NULL) *r = (rem * b + num0 - q0 * den) >> shift;
-    return ((uint64_t)q1 << 32) | q0;
-#endif
 }
 
-
-static inline struct libdivide_u64_t libdivide_internal_u64_gen(uint64_t d, int branchfree) {
-   
-
-    struct libdivide_u64_t result;
-    uint32_t floor_log_2_d = 63 - __builtin_clzll(d);
-
-    // Power of 2
-    if ((d & (d - 1)) == 0) {
-        // We need to subtract 1 from the shift value in case of an unsigned
-        // branchfree divider because there is a hardcoded right shift by 1
-        // in its division algorithm. Because of this we also need to add back
-        // 1 in its recovery algorithm.
-        result.magic = 0;
-        result.more = (uint8_t)(floor_log_2_d - (branchfree != 0));
-    } else {
-        uint64_t proposed_m, rem;
-        uint8_t more;
-        // (1 << (64 + floor_log_2_d)) / d
-        proposed_m = libdivide_128_div_64_to_64((uint64_t)1 << floor_log_2_d, 0, d, &rem);
-
-        const uint64_t e = d - rem;
-
-        // This power works if e < 2**floor_log_2_d.
-        if (!branchfree && e < ((uint64_t)1 << floor_log_2_d)) {
-            // This power works
-            more = (uint8_t)floor_log_2_d;
-        } else {
-            // We have to use the general 65-bit algorithm.  We need to compute
-            // (2**power) / d. However, we already have (2**(power-1))/d and
-            // its remainder. By doubling both, and then correcting the
-            // remainder, we can compute the larger division.
-            // don't care about overflow here - in fact, we expect it
-            proposed_m += proposed_m;
-            const uint64_t twice_rem = rem + rem;
-            if (twice_rem >= d || twice_rem < rem) proposed_m += 1;
-            more = (uint8_t)(floor_log_2_d | LIBDIVIDE_ADD_MARKER);
-        }
-        result.magic = 1 + proposed_m;
-        result.more = more;
-        // result.more's shift should in general be ceil_log_2_d. But if we
-        // used the smaller power, we subtract one from the shift because we're
-        // using the smaller power. If we're using the larger power, we
-        // subtract one from the shift because it's taken care of by the add
-        // indicator. So floor_log_2_d happens to be correct in both cases,
-        // which is why we do it outside of the if statement.
-    }
+static inline uint64_t libdivide_u64_gen(uint64_t d) {
+    uint64_t result;
+    uint64_t rem;
+    result = 1 + 2*libdivide_128_div_64_to_64((uint64_t)1 << 29, 0, d, &rem);
+    const uint64_t twice_rem = rem + rem;
+    if (twice_rem >= d || twice_rem < rem) result += 1;
     return result;
 }
 
 
-struct libdivide_u64_t libdivide_u64_gen(uint64_t d) {
-    return libdivide_internal_u64_gen(d, 0);
-}
-
-__m256i libdivide_u64_do_vec256(__m256i numers, const struct libdivide_u64_t *denom) {
-    uint8_t more = denom->more;
-    if (!denom->magic) {
-        return _mm256_srli_epi64(numers, more);
-    } else {
-        __m256i q = libdivide_mullhi_u64_vec256(numers, _mm256_set1_epi64x(denom->magic));
-        if (more & LIBDIVIDE_ADD_MARKER) {
-            // uint32_t t = ((numer - q) >> 1) + q;
-            // return t >> denom->shift;
-            uint32_t shift = more & LIBDIVIDE_64_SHIFT_MASK;
-            __m256i t = _mm256_add_epi64(_mm256_srli_epi64(_mm256_sub_epi64(numers, q), 1), q);
-            return _mm256_srli_epi64(t, shift);
-        } else {
-            return _mm256_srli_epi64(q, more);
-        }
-    }
+__m256i libdivide_u64_do_vec256(__m256i numers, uint64_t denom) {
+    __m256i q = libdivide_mullhi_u64_vec256(numers, _mm256_set1_epi64x(denom));
+    __m256i t = _mm256_add_epi64(_mm256_srli_epi64(_mm256_sub_epi64(numers, q), 1), q);
+    return _mm256_srli_epi64(t, 29);
 }
 
 // 522605027922533360535618378132637429718068114961380688657908494580122963258952897654000350692006139
@@ -335,7 +170,7 @@ public:
     static const __m256i Base01X4 = _mm256_set_epi32(0, BASE, 0, BASE, 0, BASE, 0, BASE);
     static const __m256i MaxIndexX8 = _mm256_set1_epi32(15);
     static const __m256i ShiftRMask = _mm256_set_epi32(6,5,4,3,2,1,0,7);
-    static const libdivide_u64_t BaseDivider = libdivide_u64_gen(BASE);
+    static const uint64_t BaseDivider = libdivide_u64_gen(BASE);
     static const __m256i MaskGeneratorLo = _mm256_set_epi32(6, 5, 4, 3, 2, 1, 0, -1);
     static const __m256i MaskGeneratorHi = _mm256_set_epi32(14, 13, 12, 11, 10, 9, 8, 7);
     static const __m256i Mask01X8 = _mm256_set_epi32(0, -1, 0, -1, 0, -1, 0, -1);
@@ -421,10 +256,10 @@ public:
     C = _mm256_load_si256((__m256i*)(carry + 8));
     D = _mm256_load_si256((__m256i*)(carry + 12));
 
-    X = libdivide_u64_do_vec256(A, &BaseDivider);
-    Y = libdivide_u64_do_vec256(B, &BaseDivider);
-    Z = libdivide_u64_do_vec256(C, &BaseDivider);
-    W = libdivide_u64_do_vec256(D, &BaseDivider);
+    X = libdivide_u64_do_vec256(A, BaseDivider);
+    Y = libdivide_u64_do_vec256(B, BaseDivider);
+    Z = libdivide_u64_do_vec256(C, BaseDivider);
+    W = libdivide_u64_do_vec256(D, BaseDivider);
 
     ML0 = _mm256_mul_epu32(X, Base01X4);
     ML1 = _mm256_mul_epu32(Y, Base01X4);
@@ -597,7 +432,7 @@ void factorial_test() {
     DONT_OPTIMIZE(prod);
     const int n = 90;
     for(int i = 1; i <= n; i++){
-        prod = prod * uint512_t(i);
+        prod = prod * i;
     }
   }
 }
@@ -611,7 +446,7 @@ void collatz_test() {
     if (n % two == 0){
       n = n / two;
     } else {
-      n = n * 3 + uint512_t(1);
+      n = n * 3 + 1;
     }
   }
 }
@@ -643,14 +478,15 @@ void mersenne_prime_test() {
     p = two_to_i - 1;
     if(is_prime(p)){
       i++;
+      cout << "Found prime " << i << ": 2^" << twop << "-1 = "  << p << endl;
     }
 
   }
 }
 
-auto factorize(bigint n) -> vector<bigint> {
-  vector<bigint> factors;
-  for (bigint i = 2; i * i <= n; i++) {
+auto factorize(long long n) -> vector<long long> {
+  vector<long long> factors;
+  for (long long i = 2; i * i <= n; i++) {
     while (n % i == 0) {
       factors.push_back(i);
       n /= i;
@@ -663,81 +499,27 @@ auto factorize(bigint n) -> vector<bigint> {
 
 
 int main() {
-  // __m256i MaskGeneratorLo = _mm256_set_epi32(9, 10, 11, 12, 13, 14, 15, 16);
-  // __m256i MaskGeneratorHi = _mm256_set_epi32(1, 2, 3, 4, 5, 6, 7, 8);
-    
-
-  // for(int i = 0; i < 16; i++){
-  //   __m256i MaskLo = _mm256_cmpgt_epi32(MaskGeneratorLo, _mm256_set1_epi32(i));
-  //   __m256i MaskHi = _mm256_cmpgt_epi32(MaskGeneratorHi, _mm256_set1_epi32(i));
-  //   __m256i A = _mm256_and_si256(MaskGeneratorLo, MaskLo);
-  //   __m256i B = _mm256_and_si256(MaskGeneratorHi, MaskHi);
-  //   int arr[16];
-  //   _mm256_storeu_si256((__m256i *)arr, A);
-  //   _mm256_storeu_si256((__m256i *)(arr+8), B);
-  //   for(int j = 0; j < 16; j++){
-  //     cout << arr[j] << " ";
-  //   }
-  //   cout << endl << endl;
-  // }
-  // return 0;
-
-  // alignas(32) int a[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-  // alignas(32) int b[8] = {9, 10, 11, 12, 13, 14, 15, 16};
-  // static __m256i ShiftRMask = _mm256_set_epi32(6,5,4,3,2,1,0,7);
-
-  // __m256i Zero = _mm256_setzero_si256();
-
-  // __m256i X= _mm256_load_si256((__m256i *)a);
-  // __m256i Y = _mm256_load_si256((__m256i *)b);
-
-  // __m256i CL, CH;
-  
-  // Y = _mm256_insert_epi32(Y, _mm256_extract_epi32(X, 7), 7);
-  // X = _mm256_insert_epi32(X, 0, 7);
-  // CL = _mm256_castps_si256(_mm256_permutevar8x32_ps(_mm256_castsi256_ps(X), ShiftRMask));
-  // CH = _mm256_castps_si256(_mm256_permutevar8x32_ps(_mm256_castsi256_ps(Y), ShiftRMask));
-
-
-  // // store
-  // _mm256_store_si256((__m256i *)a, CL);
-  // _mm256_store_si256((__m256i *)b, CH);
-
-  // // cout
-  // for (int i = 0; i < 8; i++) {
-  //   cout << a[i] << " ";
-  // }
-  // cout << endl;
-  // for (int i = 0; i < 8; i++) {
-  //   cout << b[i] << " ";
-  // }
-  // cout << endl;
-
-
-  fib_test();
-  gauss_test();
-  factorial_test();
-  collatz_test();
-  mersenne_prime_test();
-  return 0;
-  vector<pair<bigint, vector<bigint>>> test_data = {{1223456789123LL, {}},   {1223456789126LL, {}},
-                                                    {642524234131232LL, {}}, {1000000007LL, {}},
-                                                    {49290915216859LL, {}},  {84272973607266299, {}}};
-  chrono::steady_clock::time_point begin = chrono::steady_clock::now();
-  for (auto &[n, factors] : test_data) {
-    factors = factorize(n);
-  }
-  chrono::steady_clock::time_point end = chrono::steady_clock::now();
-
-  for (auto &[n, factors] : test_data) {
-    cout << n << ": ";
-    for (auto &factor : factors) {
-      cout << factor << " ";
+  uint512_t p = "522605027922533360535618378132637429718068114961380688657908494580122963258952897654000350692006139";
+  int c = 0;
+  for (uint512_t i = 3; i * i <= p; i = i + 2) {
+    while (p % i == 0) {
+      p = p / i;
+      cout << "Found factor " << i << endl;
     }
-    cout << endl;
+
+    c++;
+    if (c == 10000) {
+      cout << "Checked up until " << i << " the ramaining number is: " << p << endl;
+      c = 0;
+    }
   }
 
-  cout << "Time difference = " << chrono::duration_cast<chrono::microseconds>(end - begin).count() << "[µs]" << endl;
+  cout << "The biggest factor of p is " << p << endl;
 
+  // fib_test();
+  // gauss_test();
+  // factorial_test();
+  // collatz_test();
+  // mersenne_prime_test();
   return 0;
 }
