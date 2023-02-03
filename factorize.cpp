@@ -47,25 +47,6 @@ static inline __m256i libdivide_mullhi_u64_vec256(__m256i x, __m256i y) {
 }
 
 
-static inline int32_t libdivide_count_leading_zeros64(uint64_t val) {
-#if defined(__GNUC__) || __has_builtin(__builtin_clzll)
-    // Fast way to count leading zeros
-    return __builtin_clzll(val);
-#elif defined(LIBDIVIDE_VC) && defined(_WIN64)
-    unsigned long result;
-    if (_BitScanReverse64(&result, val)) {
-        return 63 - result;
-    }
-    return 0;
-#else
-    uint32_t hi = val >> 32;
-    uint32_t lo = val & 0xFFFFFFFF;
-    if (hi != 0) return libdivide_count_leading_zeros32(hi);
-    return 32 + libdivide_count_leading_zeros32(lo);
-#endif
-}
-
-
 // libdivide_128_div_64_to_64: divides a 128-bit uint {numhi, numlo} by a 64-bit uint {den}. The
 // result must fit in 64 bits. Returns the quotient directly and the remainder in *r
 static inline uint64_t libdivide_128_div_64_to_64(
@@ -74,7 +55,7 @@ static inline uint64_t libdivide_128_div_64_to_64(
     // In LLVM compiler-rt, it performs a 128/128 -> 128 division which is many times slower than
     // necessary. In gcc it's better but still slower than the divlu implementation, perhaps because
     // it's not LIBDIVIDE_INLINEd.
-#if defined(LIBDIVIDE_X86_64) && defined(LIBDIVIDE_GCC_STYLE_ASM)
+#if 1 || defined(LIBDIVIDE_X86_64) && defined(LIBDIVIDE_GCC_STYLE_ASM)
     uint64_t result;
     __asm__("divq %[v]" : "=a"(result), "=d"(*r) : [v] "r"(den), "a"(numlo), "d"(numhi));
     return result;
@@ -123,7 +104,7 @@ static inline uint64_t libdivide_128_div_64_to_64(
     // The expression (-shift & 63) is the same as (64 - shift), except it avoids the UB of shifting
     // by 64. The funny bitwise 'and' ensures that numlo does not get shifted into numhi if shift is
     // 0. clang 11 has an x86 codegen bug here: see LLVM bug 50118. The sequence below avoids it.
-    shift = libdivide_count_leading_zeros64(den);
+    shift = __builtin_clzll(den);
     den <<= shift;
     numhi <<= shift;
     numhi |= (numlo >> (-shift & 63)) & (-(int64_t)shift >> 63);
@@ -168,7 +149,7 @@ static inline struct libdivide_u64_t libdivide_internal_u64_gen(uint64_t d, int 
    
 
     struct libdivide_u64_t result;
-    uint32_t floor_log_2_d = 63 - libdivide_count_leading_zeros64(d);
+    uint32_t floor_log_2_d = 63 - __builtin_clzll(d);
 
     // Power of 2
     if ((d & (d - 1)) == 0) {
@@ -348,7 +329,7 @@ public:
 
   inline auto operator*(const uint512_t &other) const -> uint512_t {
     uint512_t result = 0;
-    alignas(32) static uint64_t carry[16];
+    alignas(64) static uint64_t carry[16];
 
     static const __m256i ZeroX8 = _mm256_set1_epi32(0);
     static const __m256i Base01X4 = _mm256_set_epi32(0, BASE, 0, BASE, 0, BASE, 0, BASE);
@@ -366,6 +347,10 @@ public:
     static const __m256i JOffsetLo = _mm256_set_epi32(0, 1, 2, 3, 4, 5, 6, 7);
     static const __m256i JOffsetHi = _mm256_set_epi32(8, 9, 10, 11, 12, 13, 14, 15);
 
+    union {
+      alignas(64) uint64_t d[4];
+      __m256i X;
+    } R;
 
     __m256i A, B, C, D, BR, DR;
     __m256i X, Y, Z, W;
@@ -423,9 +408,12 @@ public:
 
       A = _mm256_and_si256(Mask01X4, C);
       B = _mm256_srli_si256(_mm256_andnot_si256(Mask01X4, C), 8);
-      C = _mm256_add_epi64(A, B);
+      R.X = _mm256_add_epi64(A, B);
 
-      carry[i] = (uint64_t)_mm256_extract_epi64(C, 0) + (uint64_t)_mm256_extract_epi64(C, 2);
+      // A = _mm256_permute2f128_si256(C, C, 0x00);
+      // B = _mm256_permute2f128_si256(C, C, 0x11);
+      // carry[i] = _mm256_extract_epi64(_mm256_add_epi64(A, B), 0);
+      carry[i] = R.d[0] + R.d[2];
     }
 
     A = _mm256_load_si256((__m256i*)(carry + 0));
@@ -462,11 +450,9 @@ public:
     _mm256_store_si256((__m256i*)(carry + 12), W);
 
     uint64_t c = carry[0];
-    uint64_t q;
     for (int i = 1; i < 16; i++) {
-      q = c / BASE;
-      result.digits[i] += c - q * BASE;
-      c = q + (result.digits[i] >= BASE);
+      result.digits[i] += c % BASE;
+      c = (c / BASE) + (result.digits[i] >= BASE);
       if(result.digits[i] >= BASE) result.digits[i] -= BASE;
       c += carry[i];
     }
@@ -599,9 +585,9 @@ void gauss_test() {
     for(int i = 1; i <= n; i++){
         sum = sum + i;
     }
-    // if (sum+sum != uint512_t(n)*uint512_t(n+1)){
-    //     cout << "wrong result" << endl;
-    // }
+    if (sum+sum != uint512_t(n)*uint512_t(n+1)){
+        cout << "wrong result" << endl;
+    }
 }
 
 void factorial_test() {
