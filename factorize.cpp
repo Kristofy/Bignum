@@ -324,7 +324,7 @@ public:
 
     if(is_carry){
       uint32_t c = 0;
-      for (int i = 1; c && i < 16; i++) {
+      for (int i = 0; c && i < 16; i++) {
           result.digits[i] += c;
           c = result.digits[i] >= BASE;
           if(c) result.digits[i] -= BASE;
@@ -348,7 +348,8 @@ public:
 
   inline auto operator*(const uint512_t &other) const -> uint512_t {
     uint512_t result = 0;
-    static uint64_t carry[16 + 1];
+    alignas(32) static uint64_t carry[16+1];
+
     static const __m256i ZeroX8 = _mm256_set1_epi32(0);
     static const __m256i BaseX8 = _mm256_set1_epi32(0);
     static const __m256i MaxIndexX8 = _mm256_set1_epi32(15);
@@ -363,7 +364,6 @@ public:
     static const __m256i JOffsetLo = _mm256_set_epi32(0, 1, 2, 3, 4, 5, 6, 7);
     static const __m256i JOffsetHi = _mm256_set_epi32(8, 9, 10, 11, 12, 13, 14, 15);
 
-    fill(carry, carry + 16 + 1, 0);
 
     __m256i A, B, C, D, BR, DR;
     __m256i X, Y, Z, W;
@@ -371,10 +371,8 @@ public:
     __m256i QL0, QL1, QH0, QH1;
     __m256i MaskLo, MaskHi;
     __m256i IX8;
-    __m256i indexLo, indexHi;
     BR = _mm256_castps_si256(_mm256_permutevar8x32_ps(_mm256_castsi256_ps(other.Hi), ReverseShuffle));
     DR = _mm256_castps_si256(_mm256_permutevar8x32_ps(_mm256_castsi256_ps(other.Lo), ReverseShuffle));
-
 
     for (int i = 0; i < 16; i++) {
       IX8 = _mm256_set1_epi32(i);
@@ -425,29 +423,6 @@ public:
       // QH1 = libdivide_u64_do_vec256(MH1, &BaseDivider);
 
 
-     
-
-      // uint64_t qs[16];
-      // _mm256_storeu_si256((__m256i*)(qs + 0), QL0);
-      // _mm256_storeu_si256((__m256i*)(qs + 4), QL1);
-      // _mm256_storeu_si256((__m256i*)(qs + 8), QH0);
-      // _mm256_storeu_si256((__m256i*)(qs + 12), QH1);
-
-      // indexLo = _mm256_add_epi32(IX8, JOffsetLo);
-      // indexHi = _mm256_add_epi32(IX8, JOffsetHi);
-
-      // indexLo = _mm256_min_epi32(indexLo, MaxIndexX8);
-      // indexHi = _mm256_min_epi32(indexHi, MaxIndexX8);
-
-      // for (int j = 0; j <= i; j++) {
-
-      // for(int j = 0; j < 16; j++) {
-      //     cout << digitsss[j] << " ";
-      //   }
-      //   cout << endl << endl;
-
-
-
       A = _mm256_add_epi64(ML0, ML1);
       B = _mm256_add_epi64(MH0, MH1);
       C = _mm256_add_epi64(A, B);
@@ -456,18 +431,18 @@ public:
       B = _mm256_srli_si256(_mm256_andnot_si256(Mask01X4, C), 8);
       C = _mm256_add_epi64(A, B);
 
-      uint64_t t = (uint64_t)_mm256_extract_epi64(C, 0) + (uint64_t)_mm256_extract_epi64(C, 2);
-
-      uint32_t q = t / BASE;
-      result.digits[i] = t - q * BASE;
-      carry[i + 1] += q;
+      carry[i] = (uint64_t)_mm256_extract_epi64(C, 0) + (uint64_t)_mm256_extract_epi64(C, 2);
     }
 
-
+    for(int i = 0; i < 16; i++) {
+      uint64_t q = carry[i] / BASE;
+      result.digits[i] = carry[i] - q * BASE;
+      carry[i+1] += q;
+    }
 
     uint64_t c = 0;
     for (int i = 0; i < 16; i++) {
-      uint64_t c2 = carry[i] + c;
+      uint64_t c2 = c;
       result.digits[i] += c2 % BASE;
       c = c2 / BASE + result.digits[i] / BASE;
       result.digits[i] %= BASE;
@@ -629,6 +604,7 @@ void collatz_test() {
     } else {
       n = n * 3 + uint512_t(1);
     }
+    cout << n << endl;
   }
 }
 
