@@ -1,0 +1,13 @@
+{
+    "files.associations": {
+      "deque": "cpp",
+      "string": "cpp",
+      "vector": "cpp",
+      "array": "cpp",
+      "atomic": "cpp",
+      "ostream": "cpp"
+    },
+    "C_Cpp.codeAnalysis.clangTidy.checks.disabled": [
+      "llvmlibc-callee-namespace"
+    ]
+}

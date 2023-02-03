@@ -1,0 +1,5 @@
+test_addition_fib took 21 ms
+test_addition_gauss took 2962 ms
+test_multiplication_factorial took 19 ms
+test_division_collatz took 939 ms
+test_division_mersenne_prime took 4839 ms
