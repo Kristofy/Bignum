@@ -5,7 +5,8 @@
       "vector": "cpp",
       "array": "cpp",
       "atomic": "cpp",
-      "ostream": "cpp"
+      "ostream": "cpp",
+      "functional": "cpp"
     },
     "C_Cpp.codeAnalysis.clangTidy.checks.disabled": [
       "llvmlibc-callee-namespace"
