@@ -9,6 +9,7 @@
       "functional": "cpp"
     },
     "C_Cpp.codeAnalysis.clangTidy.checks.disabled": [
-      "llvmlibc-callee-namespace"
+      "llvmlibc-callee-namespace",
+      "clang-diagnostic-error"
     ]
 }
