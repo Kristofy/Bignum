@@ -281,6 +281,7 @@ public:
 
   auto operator+(const uint512_t &other) const -> uint512_t {
     uint512_t result;
+    plus_timer.resume();
     static const __m256i BaseX8 = _mm256_set1_epi32(BASE);
     static const __m256i OneX8 = _mm256_set1_epi32(1);
     static const __m256i ShiftRMask = _mm256_set_epi32(6,5,4,3,2,1,0,7);
@@ -331,23 +332,28 @@ public:
       }
     }
 
+    plus_timer.stop();
     return result;
   }
 
   // TODO: Optimize
   inline auto operator-(const uint512_t &other) const -> uint512_t {
     uint512_t result;
+    minus_timer.resume();
     uint32_t carry = 0;
     for (int i = 0; i < 16; i++) {
         result.digits[i] = digits[i] - other.digits[i] - carry;
         carry = result.digits[i] / BASE;
         result.digits[i] %= BASE;
     }
+
+    minus_timer.stop();
     return result;
   }
 
   inline auto operator*(const uint512_t &other) const -> uint512_t {
     uint512_t result = 0;
+    mult_timer.resume();
     alignas(32) static uint64_t carry[16];
 
     static const __m256i ZeroX8 = _mm256_set1_epi32(0);
@@ -471,11 +477,14 @@ public:
       c += carry[i];
     }
 
+
+    mult_timer.stop();
     return result;
   }
 
   inline auto operator/(const uint512_t &other) const -> uint512_t {
     uint512_t result = 0;
+    div_timer.resume();
     uint512_t remainder = 0;
     for (int i = 15; i >= 0; i--) {
       remainder = remainder * BASE + digits[i];
@@ -491,11 +500,14 @@ public:
       result.digits[i] = low;
       remainder = remainder - other * low;
     }
+
+    div_timer.stop();
     return result;
   }
 
   inline auto operator%(const uint512_t &other) const -> uint512_t {
     uint512_t result = 0;
+    mod_timer.resume();
     uint512_t remainder = 0;
     for (int i = 15; i >= 0; i--) {
       remainder = remainder * BASE + digits[i];
@@ -511,26 +523,32 @@ public:
       result.digits[i] = low;
       remainder = remainder - other * low;
     }
+
+    mod_timer.stop();
     return remainder;
   }
 
   inline auto operator==(const uint512_t &other) const -> bool {
+    eq_timer.resume();
     for (int i = 0; i < 16; i++) {
       if (digits[i] != other.digits[i]) {
         return false;
       }
     }
+    eq_timer.stop();
     return true;
   }
 
   inline auto operator!=(const uint512_t &other) const -> bool { return !(*this == other); }
 
   inline auto operator<(const uint512_t &other) const -> bool {
+    lt_timer.resume();
     for (int i = 15; i >= 0; i--) {
       if (digits[i] != other.digits[i]) {
         return digits[i] < other.digits[i];
       }
     }
+    lt_timer.stop();
     return false;
   }
 
@@ -571,4 +589,20 @@ public:
     n = uint512_t(num_str);
     return is;
   }
+
+  static AdditiveTimer plus_timer;
+  static AdditiveTimer minus_timer;
+  static AdditiveTimer mult_timer;
+  static AdditiveTimer div_timer;
+  static AdditiveTimer mod_timer;
+  static AdditiveTimer eq_timer;
+  static AdditiveTimer lt_timer;
 };
+
+AdditiveTimer uint512_t::plus_timer{};
+AdditiveTimer uint512_t::minus_timer{};
+AdditiveTimer uint512_t::mult_timer{};
+AdditiveTimer uint512_t::div_timer{};
+AdditiveTimer uint512_t::mod_timer{};
+AdditiveTimer uint512_t::eq_timer{};
+AdditiveTimer uint512_t::lt_timer{};
